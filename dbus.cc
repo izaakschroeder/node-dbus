@@ -378,7 +378,7 @@ public:
 			bool no_error_status = true;
 			for (unsigned int i=0; i < arrayData->Length(); i++) {
 				Local<Value> arrayItem = arrayData->Get(i);
-				if ( encode(arrayItem, &subIter, array_sig) ) {
+				if (!encode(arrayItem, &subIter, array_sig) ) {
 					no_error_status = false;
 					break;
 				}
