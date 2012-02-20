@@ -1,0 +1,3 @@
+= DBUS =
+
+Node.js bindings for libdbus. There are no dependencies on glib.
