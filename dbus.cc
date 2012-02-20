@@ -590,7 +590,12 @@ public:
 	};
 
 	static Handle<Value> getMember(Local<String> property, const AccessorInfo& info) {
-		return String::New(dbus_message_get_member(*THIS_MESSAGE(info)));
+		DBusMessage* message = *THIS_MESSAGE(info);
+		int type = dbus_message_get_type(message) ;
+		if (type == DBUS_MESSAGE_TYPE_METHOD_CALL || type == DBUS_MESSAGE_TYPE_METHOD_RETURN || type == DBUS_MESSAGE_TYPE_SIGNAL)
+			return String::New(dbus_message_get_member(*THIS_MESSAGE(info)));
+		else
+			return Undefined();
 	};
 
 	static void setMember(Local<String> property,  Local<Value> value, const AccessorInfo& info) {
@@ -598,7 +603,12 @@ public:
 	};
 
 	static Handle<Value> getInterface(Local<String> property, const AccessorInfo& info) {
-		return String::New(dbus_message_get_interface(*THIS_MESSAGE(info)));
+		DBusMessage* message = *THIS_MESSAGE(info);
+		int type = dbus_message_get_type(message) ;
+		if (type == DBUS_MESSAGE_TYPE_METHOD_CALL || type == DBUS_MESSAGE_TYPE_METHOD_RETURN || type == DBUS_MESSAGE_TYPE_SIGNAL)
+			return String::New(dbus_message_get_interface(message));
+		else
+			return Undefined();
 	};
 
 	static void setInterface(Local<String> property,  Local<Value> value, const AccessorInfo& info) {
@@ -618,7 +628,7 @@ public:
 	//FIXME: This should be replaced with libuv mutexes, but libuv doesn't expose them in
 	//node 0.6.10 unfortunately.
 	bool sending;	
-	
+
 	DBusConnection* connection;
 	bool priv;
 	
@@ -672,7 +682,7 @@ public:
 	class ConnectionCallbackBaton {
 	public:
 		ConnectionCallbackBaton(Persistent<Function> cb, DBusConnectionWrap* conn) : callback(cb), connection(conn) { };
-		~ConnectionCallbackBaton() { callback.Dispose(); };
+		~ConnectionCallbackBaton() { /*callback.Dispose();*/ };
 		Persistent<Function> callback;
 		DBusConnectionWrap* connection;
 	};
@@ -704,13 +714,10 @@ public:
 
 	static void dispatch(uv_work_t* req) {
 		DispatchBaton* baton = static_cast<DispatchBaton*>(req->data);
-		if (!baton->connection->sending) {
-			baton->connection->sending = true;
-			while(dbus_connection_get_dispatch_status(*baton->connection) == DBUS_DISPATCH_DATA_REMAINS)
-				dbus_connection_dispatch(*baton->connection);
-			baton->connection->sending = false;
-		}
-		
+		baton->connection->sending = true;
+		while(dbus_connection_get_dispatch_status(*baton->connection) == DBUS_DISPATCH_DATA_REMAINS)
+			dbus_connection_dispatch(*baton->connection);
+		baton->connection->sending = false;
 	}
 
 	static void dispatchDone(uv_work_t* req) {
@@ -719,8 +726,9 @@ public:
 	}
 
 	static void dispatchStatus(DBusConnection *connection, DBusDispatchStatus status, void *data) {
-		if (status == DBUS_DISPATCH_DATA_REMAINS) {
-			DispatchBaton* baton = new DispatchBaton((DBusConnectionWrap*)data);
+		DBusConnectionWrap* wrap = ((DBusConnectionWrap*)data);
+		if (status == DBUS_DISPATCH_DATA_REMAINS && !wrap->sending) {
+			DispatchBaton* baton = new DispatchBaton(wrap);
 			uv_queue_work(uv_default_loop(), &baton->work, dispatch, dispatchDone);
 		}
 	};

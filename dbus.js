@@ -25,13 +25,12 @@ function DBus(bus, destination) {
 DBus.SYSTEM = dbus.DBUS_BUS_SYSTEM;
 DBus.SESSION = dbus.DBUS_BUS_SESSION;
 
-DBus.__defineGetter__("system", function() {
-	return new DBus(DBus.SYSTEM);
-})
+DBus.get = function(bus, destination) {
+	return new DBus(bus, destination);
+}
 
-DBus.__defineGetter__("session", function() {
-	return new DBus(DBus.SESSION);
-})
+DBus.system = DBus.get.bind(undefined, DBus.SYSTEM);
+DBus.session = DBus.get.bind(undefined, DBus.SESSION);
 
 
 DBus.prototype.object = function(path) {
@@ -120,17 +119,22 @@ DBusObject.prototype.as = function(interface) {
 	return new DBusProxy(this, interface);
 }
 
-function DBusProxy(object, interface) {
+function DBusProxy(object, _interface) {
+
+	if (typeof _interface !== "string")
+		throw new TypeError("Interface must be a string!");
+
 	EventEmitter.call(this);
 	var self = this;
 	this.bus = object.bus;
-	this.interface = interface;
+	this.interface = _interface;
 	this.object = object;
 
 	object.inspect(function(data) {
-		interface = data.interfaces[interface];
+		var interface = data.interfaces[_interface];
+		
 		if (typeof interface === "undefined")
-			throw new Error("Unable to get interface!");
+			throw new Error("Unable to get interface "+_interface+"!");
 
 		interface.methods.forEach(function(method) {
 			var name = method.name;
