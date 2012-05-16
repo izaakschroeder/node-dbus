@@ -1,14 +1,16 @@
 
 var 
-	DOM = require('dom'),
+	DOM = require('com.izaakschroeder.dom'),
 	util = require('util'),
 	dbus = require('./build/Release/dbus'),
 	EventEmitter = require('events').EventEmitter;
 
 
 
-
-
+/**
+ * DBus
+ * This wraps a bus object.
+ */
 function DBus(bus, destination) {
 	switch(typeof bus) {
 	case "number":
@@ -20,7 +22,13 @@ function DBus(bus, destination) {
 	}
 	
 	this.destination = destination;
+
+	var self = this;
+	process.on("exit", function() {
+		self.close();
+	})
 }
+
 
 DBus.SYSTEM = dbus.DBUS_BUS_SYSTEM;
 DBus.SESSION = dbus.DBUS_BUS_SESSION;
@@ -33,30 +41,54 @@ DBus.system = DBus.get.bind(undefined, DBus.SYSTEM);
 DBus.session = DBus.get.bind(undefined, DBus.SESSION);
 
 
+DBus.prototype.close = function() {
+	this.backend.close();
+}
+
 DBus.prototype.object = function(path) {
 	return new DBusObject(this, path);
 }
 
+/**
+ * DBusObject
+ * Wraps a DBus object.
+ *
+ */
 function DBusObject(bus, path) {
 	EventEmitter.call(this);
 	this.bus = bus;
 	this.path = path;
-	this.inspection = undefined;
+	this.introspection = undefined;
 	var self = this;
 
-	bus.backend.registerObjectPath(path, function(message) {
-		var args = [(message.interface+"."+message.member).toLowerCase()];
-		Array.prototype.push.apply(args, message.arguments);
-		self.emit.apply(self, args);
-	})
+	//Call the C++ code to register the object path and appropriate callback
+	bus.backend.registerObjectPath(path, (function(message) {
+		//Look at the type of message
+		switch(message.type) {
+		case dbus.DBUS_MESSAGE_TYPE_SIGNAL: //If it's a signal
+			//Emit it
+			var args = [(message.interface+"."+message.member).toLowerCase()];
+			Array.prototype.push.apply(args, message.arguments);
+			this.emit.apply(this, args);
+			
+			break;
+		case dbus.DBUS_MESSAGE_TYPE_ERROR:
+
+			this.emit("error");
+		default:
+			break;
+		}
+		delete message;
+		
+	}).bind(this))
 
 }
 util.inherits(DBusObject, EventEmitter);
 
-DBusObject.prototype.inspect = function(callback) {
+DBusObject.prototype.introspect = function(callback) {
 
-	if (this.inspection)
-		return this.inspection;
+	if (this.introspection)
+		return this.introspection;
 
 	var self = this, message = dbus.methodCall(this.bus.destination, this.path, "org.freedesktop.DBus.Introspectable", "Introspect");
 	
@@ -109,39 +141,41 @@ DBusObject.prototype.inspect = function(callback) {
 
 			})
 			
-			self.inspection = res;
+			self.introspection = res;
 			callback(res);
 		});
 	})
 }
 
-DBusObject.prototype.as = function(interface) {
-	return new DBusProxy(this, interface);
+DBusObject.prototype.as = function(interfaceName) {
+	return new DBusProxy(this, interfaceName);
 }
 
-function DBusProxy(object, _interface) {
+function DBusProxy(object, interfaceName) {
 
-	if (typeof _interface !== "string")
+	if (typeof interfaceName !== "string")
 		throw new TypeError("Interface must be a string!");
 
 	EventEmitter.call(this);
 	var self = this;
+	
 	this.bus = object.bus;
-	this.interface = _interface;
+	this.interfaceName = interfaceName;
 	this.object = object;
 
-	object.inspect(function(data) {
-		var interface = data.interfaces[_interface];
+	object.introspect(function(data) {
+		var dbusInterface = data.interfaces[interfaceName];
 		
-		if (typeof interface === "undefined")
-			throw new Error("Unable to get interface "+_interface+"!");
+		if (typeof dbusInterface === "undefined")
+			throw new Error("Unable to get interface "+interfaceName+"!");
 
-		interface.methods.forEach(function(method) {
+		dbusInterface.methods.forEach(function(method) {
 			var name = method.name;
 			name = name.charAt(0).toLowerCase() + name.slice(1);
 
+			
 			self[name] = function() {
-				var message = dbus.methodCall(self.bus.destination, object.path, interface.name, method.name), callback = arguments[arguments.length - 1];
+				var message = dbus.methodCall(self.bus.destination, object.path, dbusInterface.name, method.name), callback = arguments[arguments.length - 1];
 
 				if (typeof callback !== "function")
 					throw new TypeError("Callback must be a function!");
@@ -185,8 +219,9 @@ function DBusProxy(object, _interface) {
 util.inherits(DBusProxy, EventEmitter)
 
 DBusProxy.prototype.on = function(method, listener) {
-	var self = this;
-	this.object.on((this.interface+"."+method).toLowerCase(), function() {
+	var self = this, event = (this.interfaceName+"."+method).toLowerCase();
+
+	this.object.on(event, function() {
 		var args = [method];
 		Array.prototype.push.apply(args, arguments);
 		self.emit.apply(self, args);

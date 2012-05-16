@@ -624,24 +624,18 @@ class DBusConnectionWrap : ObjectWrap {
 public:
 
 	static Persistent<FunctionTemplate> constructorTemplate;
-	
-	//FIXME: This should be replaced with libuv mutexes, but libuv doesn't expose them in
-	//node 0.6.10 unfortunately.
-	bool sending;	
 
 	DBusConnection* connection;
 	bool priv;
 	
 	
-	DBusConnectionWrap(DBusConnection* c, bool p) : ObjectWrap(), connection(c), priv(p), sending(false) {
+	DBusConnectionWrap(DBusConnection* c, bool p) : ObjectWrap(), connection(c), priv(p) {
 		
 	};
 	
 	~DBusConnectionWrap() {
-		if (priv &&  dbus_connection_get_is_connected(*this))
-			dbus_connection_close(*this);
-		dbus_connection_unref(*this);
 		
+		printf("dtor");
 	};
 	
 	operator DBusConnection* () const {
@@ -659,6 +653,7 @@ public:
 		NODE_SET_METHOD(target, "open", open);
 		NODE_SET_METHOD(target, "get", get);
 
+		NODE_SET_PROTOTYPE_METHOD(t, "close", close);
 		NODE_SET_PROTOTYPE_METHOD(t, "requestName", requestName);
 
 		//NODE_SET_PROTOTYPE_METHOD(t, "close", close);
@@ -689,17 +684,24 @@ public:
 
 	class DispatchBaton {
 	public:
-		DispatchBaton(DBusConnectionWrap* conn) : connection(conn) { work.data = this; };
+		DispatchBaton(DBusConnectionWrap* conn, uv_async_cb cb) : connection(conn) { 
+			uv_async_init(uv_default_loop(), &this->work, cb);
+			this->work.data = this;
+		};
 		DBusConnectionWrap* connection;
-		uv_work_t work;
+		uv_async_t work;
 	};
 
 	template<class T> class ConnectionCallbackWorkBaton {
 	public:
-		ConnectionCallbackWorkBaton(ConnectionCallbackBaton* c, T d) : callbackBaton(c), data(d) { work.data = this; };
+		ConnectionCallbackWorkBaton(ConnectionCallbackBaton* c, T d, uv_async_cb cb) : callbackBaton(c), data(d) { 
+			uv_async_init(uv_default_loop(), &this->work, cb);
+			this->work.data = this;
+		};
+		~ConnectionCallbackWorkBaton() { };
 		ConnectionCallbackBaton* callbackBaton;
 		T data;
-		uv_work_t work;
+		uv_async_t work;
 
 	};
 
@@ -710,26 +712,27 @@ public:
 		return args.This();
 	};
 
+	static Handle<Value> close(const Arguments &args) {
+		DBusConnectionWrap* connection = THIS_CONNECTION(args);
+		if (connection->priv &&  dbus_connection_get_is_connected(*connection))
+			dbus_connection_close(*connection);
+		dbus_connection_unref(*connection);
+	};
 
 
-	static void dispatch(uv_work_t* req) {
-		DispatchBaton* baton = static_cast<DispatchBaton*>(req->data);
-		baton->connection->sending = true;
-		while(dbus_connection_get_dispatch_status(*baton->connection) == DBUS_DISPATCH_DATA_REMAINS)
-			dbus_connection_dispatch(*baton->connection);
-		baton->connection->sending = false;
-	}
 
-	static void dispatchDone(uv_work_t* req) {
-		DispatchBaton* baton = static_cast<DispatchBaton*>(req->data);
-		delete baton;
+	static void dispatch(uv_async_t* work, int status) {
+		DispatchBaton* baton = static_cast<DispatchBaton*>(work->data);
+		DBusConnection* connection = *baton->connection;
+		while(dbus_connection_dispatch(connection) == DBUS_DISPATCH_DATA_REMAINS);
+		//delete baton;
 	}
 
 	static void dispatchStatus(DBusConnection *connection, DBusDispatchStatus status, void *data) {
 		DBusConnectionWrap* wrap = ((DBusConnectionWrap*)data);
-		if (status == DBUS_DISPATCH_DATA_REMAINS && !wrap->sending) {
-			DispatchBaton* baton = new DispatchBaton(wrap);
-			uv_queue_work(uv_default_loop(), &baton->work, dispatch, dispatchDone);
+		if (status == DBUS_DISPATCH_DATA_REMAINS) {
+			DispatchBaton* baton = new DispatchBaton(wrap, dispatch);
+			uv_async_send(&baton->work);
 		}
 	};
 
@@ -740,9 +743,12 @@ public:
 
 	static void watchCallback(struct ev_loop *loop, ev_io *io, int events) {
 		DBusWatch *watch = static_cast<DBusWatch*>(io->data);
-		dbus_watch_handle(watch, 
+		int flags = dbus_watch_get_flags(watch);
+		while (!dbus_watch_handle(watch, 
 			(events & EV_READ ? DBUS_WATCH_READABLE : 0) | 
-			(events & EV_WRITE ? DBUS_WATCH_WRITABLE : 0)
+			(events & EV_WRITE ? DBUS_WATCH_WRITABLE : 0) |
+			(events & EV_ERROR ? DBUS_WATCH_ERROR | DBUS_WATCH_HANGUP : 0)
+			)
 		);
 	}
 
@@ -756,13 +762,13 @@ public:
 			);
 		}
 		else {
-			ev_io_set(io, dbus_watch_get_socket(watch), 0);
+			ev_io_set(io, dbus_watch_get_unix_fd(watch), 0);
 		}
 	}
 	
 	static dbus_bool_t addWatch(DBusWatch *watch, void *data) {
 		ev_io* io = new ev_io();
-		ev_io_init(io, watchCallback, dbus_watch_get_socket(watch), 0);
+		ev_io_init(io, watchCallback, dbus_watch_get_unix_fd(watch), EV_READ | EV_WRITE);
 		io->data = watch;
 		dbus_watch_set_data(watch, io, freeWatchData);
 		configureWatch(watch);
@@ -781,7 +787,7 @@ public:
 
 
 	static void freeTimeoutData(void* data) {
-		//uv_timer_t* timer = static_cast<uv_timer_t*>(data);
+		uv_timer_t* timer = static_cast<uv_timer_t*>(data);
 		//delete timer;
 	};
 
@@ -811,7 +817,6 @@ public:
 	static void removeTimeout(DBusTimeout *timeout, void *data) {
 		uv_timer_t* timer = static_cast<uv_timer_t*>(dbus_timeout_get_data(timeout));
 		uv_timer_stop(timer);
-		delete timer;
 	};
 	
 	static void timeoutToggled(DBusTimeout *timeout, void *data) {
@@ -835,12 +840,8 @@ public:
 		dbus_connection_set_watch_functions(connection, addWatch, removeWatch, watchToggled, wrap, NULL);
 		dbus_connection_set_timeout_functions(connection, addTimeout, removeTimeout, timeoutToggled, wrap, NULL);
 
-
-		DBusDispatchStatus status = dbus_connection_get_dispatch_status(connection);
-
-		if (status != DBUS_DISPATCH_COMPLETE) {
-			dispatchStatus(connection, status, wrap);
-		}
+		dispatchStatus(connection, dbus_connection_get_dispatch_status(connection), wrap);
+		
 
 		
 
@@ -854,24 +855,25 @@ public:
 	
 
 	static void freeConnectionCallbackBaton(void* data) {
-		delete (ConnectionCallbackBaton*)data;
+		//delete (ConnectionCallbackBaton*)data;
 	}
 
 
-	static void handleMessageUserland(uv_work_t* work) {
+	static void handleMessageUserland(uv_async_t* work, int status) {
+		HandleScope scope;
 		ConnectionCallbackWorkBaton<DBusMessage*>* baton = static_cast<ConnectionCallbackWorkBaton<DBusMessage*>*>(work->data);
-		Local<Value> argv[1] = { Local<Value>::New(DBusMessageWrap::finalizeMessage(baton->data)) };
-
+		Handle<Value> argv[1] = { DBusMessageWrap::finalizeMessage(baton->data) };
+		TryCatch tryCatch;
 		baton->callbackBaton->callback->Call(Context::GetCurrent()->Global(), 1, argv);
-
+		if (tryCatch.HasCaught())
+			FatalException(tryCatch);
 		
 	}
 
 	static DBusHandlerResult handleMessage(DBusConnection* connection, DBusMessage* message, void* data) {
-
-		ConnectionCallbackWorkBaton<DBusMessage*>* baton = new ConnectionCallbackWorkBaton<DBusMessage*>(static_cast<ConnectionCallbackBaton*>(data), message);
-		uv_queue_work(uv_default_loop(), &baton->work, NULL, handleMessageUserland);	
-
+		ConnectionCallbackWorkBaton<DBusMessage*>* baton = new ConnectionCallbackWorkBaton<DBusMessage*>(static_cast<ConnectionCallbackBaton*>(data), message, handleMessageUserland);
+		dbus_message_ref(message);
+		uv_async_send(&baton->work);
 		return DBUS_HANDLER_RESULT_HANDLED;
 	};
 
@@ -917,32 +919,29 @@ public:
 	}
 
 
-	static void pendingCallNotifyCallbackUserland(uv_work_t* work) {
-		
+	static void pendingCallNotifyCallbackUserland(uv_async_t* work, int status) {
+
 		ConnectionCallbackWorkBaton<DBusPendingCall*>* baton = static_cast<ConnectionCallbackWorkBaton<DBusPendingCall*>*>(work->data);
 		DBusPendingCall *pending = baton->data;
 
-		if (dbus_pending_call_get_completed(pending)) {
-			DBusMessage* reply = dbus_pending_call_steal_reply(pending);		
-			TryCatch tryCatch;
-			Local<Value> argv[] = { Local<Value>::New(DBusMessageWrap::finalizeMessage(reply)) };
-			baton->callbackBaton->callback->Call(Context::GetCurrent()->Global(), 1, argv);
-			if (tryCatch.HasCaught())
-				FatalException(tryCatch);
-			dbus_pending_call_unref(pending);
+		DBusMessage* reply = dbus_pending_call_steal_reply(pending);		
+		HandleScope scope;
+		TryCatch tryCatch;
+		Local<Value> argv[] = { Local<Value>::New(DBusMessageWrap::finalizeMessage(reply)) };
+		baton->callbackBaton->callback->Call(Context::GetCurrent()->Global(), 1, argv);
+		if (tryCatch.HasCaught())
+			FatalException(tryCatch);
+		dbus_pending_call_unref(pending);
 			
 			
-		}
-		else {
-			printf("EMPTY CALLBACK\n");
-		}
 		
-		delete baton;
+
+		//delete baton;
 	}
 
 	static void pendingCallNotifyCallback(DBusPendingCall *pending, void *data) {
-		ConnectionCallbackWorkBaton<DBusPendingCall*>* baton = new ConnectionCallbackWorkBaton<DBusPendingCall*>(static_cast<ConnectionCallbackBaton*>(data), pending);
-		uv_queue_work(uv_default_loop(), &baton->work, NULL, pendingCallNotifyCallbackUserland);		
+		ConnectionCallbackWorkBaton<DBusPendingCall*>* baton = new ConnectionCallbackWorkBaton<DBusPendingCall*>(static_cast<ConnectionCallbackBaton*>(data), pending, pendingCallNotifyCallbackUserland);
+		uv_async_send(&baton->work);
 	};
 
 

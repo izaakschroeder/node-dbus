@@ -1,3 +1,8 @@
 {
-	"main": "dbus.js"
+	"name": "com.izaakschroeder.dbus",
+	"version": "0.0.3",
+	"main": "dbus.js",
+	"dependencies": {
+		"com.izaakschroeder.dom": ">=0.0.2"
+	}
 }

@@ -1,3 +1,40 @@
 = DBUS =
 
 Node.js bindings for libdbus. There are no dependencies on glib.
+
+{{{
+
+var 
+	//Get the dbus module
+	dbus = require('dbus'), 
+	
+	//Use the system bus with Avahi namespace
+	bus = dbus.system('org.freedesktop.Avahi'), 
+	
+	//Get the root object and access its server interface
+	root = dbus.object('/').as('org.freedesktop.Avahi.Server'); 
+
+//Wait till the root object is ready for operation as the DBus introspection
+//system will automatically populate all the methods of the root object
+root.on("ready", function() {
+	//Call the serviceBrowserNew method as defined by the Avahi specification; all functions have
+	//their first letter lowercased and one additional parameter, the callback, added.
+	//interface, protocol, type, domain, flags
+	root.serviceBrowserNew(-1, -1, "_ssh._tcp", "", 0, function(err, browser) {
+		if (err)
+			throw new Error('Unable to make service browser: '+err);
+		//Now we have a service browser object; all objects are automatically converted into
+		//DBUSObject behind the scenes, so we just need to specify the interface of the object
+		//we wish to access
+		browser = brower.as('org.freedesktop.Avahi.ServiceBrowser');
+
+		//Signals to objects are emitted as events. You do NOT need to wait on the "ready" event
+		//to register event handlers. Event names also, likewise, have their first letter lowercased
+		//to match JavaScript convention
+		browser.on("itemNew", function(interface, protocol, name, type, domain, flags) {
+			console.log("Found new service! "+name)
+		})
+	});
+})
+
+}}}
